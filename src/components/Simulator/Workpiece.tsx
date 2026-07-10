@@ -70,26 +70,49 @@ export const Workpiece: React.FC<WorkpieceProps> = ({
     return new THREE.ExtrudeGeometry(shape, extrudeSettings);
   }, [width, height, thickness, predrillPos]);
 
-  // Create the "cut" geometry by lofting between lower and upper path
+  // Create the "cut" geometry by lofting between lower and upper path up to progress
   const cutGeom = useMemo(() => {
     if (path.length < 2) return null;
+
+    const totalDistance = path[path.length - 1].distance;
+    const currentDist = totalDistance * progress;
 
     const geometry = new THREE.BufferGeometry();
     const vertices: number[] = [];
     
     // We'll build a "ribbon" that represents the cut surfaces
-    // In a real EDM sim, this would be a CSG operation, but here we visualize the "walls" of the cut
+    // Only include segments that have been reached by the wire
     for (let i = 0; i < path.length - 1; i++) {
       const p1 = path[i];
       const p2 = path[i + 1];
 
+      // If this segment is entirely after current progress, skip
+      if (p1.distance > currentDist) continue;
+
+      // Handle partial segment
+      let endX = p2.x;
+      let endY = p2.y;
+      let endU = p2.u;
+      let endV = p2.v;
+      let endDist = p2.distance;
+
+      if (currentDist < p2.distance) {
+        const segDist = p2.distance - p1.distance;
+        const alpha = segDist === 0 ? 0 : (currentDist - p1.distance) / segDist;
+        endX = p1.x + (p2.x - p1.x) * alpha;
+        endY = p1.y + (p2.y - p1.y) * alpha;
+        endU = p1.u + (p2.u - p1.u) * alpha;
+        endV = p1.v + (p2.v - p1.v) * alpha;
+        endDist = currentDist;
+      }
+
       // Lower path (XY)
       const l1 = new THREE.Vector3(p1.x, p1.y, -thickness / 2);
-      const l2 = new THREE.Vector3(p2.x, p2.y, -thickness / 2);
+      const l2 = new THREE.Vector3(endX, endY, -thickness / 2);
 
       // Upper path (XY + UV)
       const u1 = new THREE.Vector3(p1.x + p1.u, p1.y + p1.v, thickness / 2);
-      const u2 = new THREE.Vector3(p2.x + p2.u, p2.y + p2.v, thickness / 2);
+      const u2 = new THREE.Vector3(endX + endU, endY + endV, thickness / 2);
 
       // Quad for the cut face
       // Triangle 1
@@ -103,10 +126,12 @@ export const Workpiece: React.FC<WorkpieceProps> = ({
       vertices.push(u1.x, u1.y, u1.z);
     }
 
+    if (vertices.length === 0) return null;
+
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
     geometry.computeVertexNormals();
     return geometry;
-  }, [path, thickness]);
+  }, [path, thickness, progress]);
 
   return (
     <group>

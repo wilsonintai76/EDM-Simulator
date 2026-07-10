@@ -97,80 +97,6 @@ export const Simulator: React.FC = () => {
     setDiagnostics(validateGCode(gcode));
   }, [gcode]);
 
-  // Animation Loop logic
-  useEffect(() => {
-    let lastTime = performance.now();
-    let frameId: number;
-
-    const animate = (time: number) => {
-      const delta = (time - lastTime) / 1000;
-      lastTime = time;
-
-      if (state.isPlaying && !state.isWireBroken) {
-        setState(prev => {
-          const mat = MATERIALS[prev.material];
-          const nextProgress = prev.progress + delta * prev.speed * mat.speedMult;
-          let currentTension = prev.speed * 40 * mat.riskMult;
-          
-          // Check for wire break conditions
-          if (path.length > 2) {
-            const currentIdx = Math.floor(nextProgress * (path.length - 1));
-            if (currentIdx > 0 && currentIdx < path.length - 1) {
-              const pPrev = path[currentIdx - 1];
-              const pCurr = path[currentIdx];
-              const pNext = path[currentIdx + 1];
-
-              // Vector v1 = curr - prev, v2 = next - curr
-              const v1 = { x: pCurr.x - pPrev.x, y: pCurr.y - pPrev.y };
-              const v2 = { x: pNext.x - pCurr.x, y: pNext.y - pCurr.y };
-
-              const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y);
-              const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y);
-
-              if (mag1 > 0.1 && mag2 > 0.1) {
-                const dot = (v1.x * v2.x + v1.y * v2.y) / (mag1 * mag2);
-                const angle = Math.acos(Math.max(-1, Math.min(1, dot))) * (180 / Math.PI);
-
-                // Update tension based on angle
-                currentTension += (angle / 90) * 40 * mat.riskMult;
-                
-                // Add taper tension
-                currentTension += (Math.abs(pCurr.u) + Math.abs(pCurr.v)) * 2 * mat.riskMult;
-
-                // If angle is sharp (> 45 degrees) and speed is high, trigger "break"
-                const breakThreshold = 0.4 / mat.speedMult;
-                if (angle > 45 && prev.speed > breakThreshold && Math.random() < (0.05 * mat.riskMult)) {
-                  return { 
-                    ...prev, 
-                    isPlaying: false, 
-                    isWireBroken: true, 
-                    tension: 100,
-                    breakReason: `Wire breakage at segment ${currentIdx}. Cause: Excessive tension on ${mat.name} at sharp corner (${angle.toFixed(1)}°). Reduce simulation speed or adjust feed rate.`
-                  };
-                }
-              }
-            }
-          }
-
-          // Random fluctuation
-          currentTension += (Math.random() - 0.5) * 5;
-          currentTension = Math.max(0, Math.min(100, currentTension));
-
-          if (nextProgress >= 1) {
-            return { ...prev, progress: 1, isPlaying: false, tension: 0 };
-          }
-          return { ...prev, progress: nextProgress, tension: currentTension };
-        });
-      } else if (!state.isPlaying) {
-        setState(prev => ({ ...prev, tension: 0 }));
-      }
-      frameId = requestAnimationFrame(animate);
-    };
-
-    frameId = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(frameId);
-  }, [state.isPlaying, state.speed, state.isWireBroken, path]);
-
   const fullPath = useMemo(() => {
     if (path.length === 0) return [];
     
@@ -206,13 +132,137 @@ export const Simulator: React.FC = () => {
 
   const pathPoints = useMemo(() => fullPath.map(p => new THREE.Vector3(p.x, p.y, 0)), [fullPath]);
   
+  const cutPoints = useMemo(() => {
+    if (fullPath.length === 0) return [];
+    const totalDistance = fullPath[fullPath.length - 1].distance;
+    const currentDist = totalDistance * state.progress;
+    
+    const pts: THREE.Vector3[] = [];
+    for (let i = 0; i < fullPath.length - 1; i++) {
+      const p1 = fullPath[i];
+      const p2 = fullPath[i+1];
+      pts.push(new THREE.Vector3(p1.x, p1.y, 0));
+      
+      if (currentDist >= p1.distance && currentDist <= p2.distance) {
+        const segDist = p2.distance - p1.distance;
+        const alpha = segDist === 0 ? 0 : (currentDist - p1.distance) / segDist;
+        pts.push(new THREE.Vector3(
+          p1.x + (p2.x - p1.x) * alpha,
+          p1.y + (p2.y - p1.y) * alpha,
+          0
+        ));
+        return pts;
+      }
+    }
+    // If progress is 1, return all points
+    if (state.progress >= 0.999) return fullPath.map(p => new THREE.Vector3(p.x, p.y, 0));
+    return pts;
+  }, [fullPath, state.progress]);
+
   const currentPoint = useMemo(() => {
     const defaultPoint = { x: 0, y: 0, u: 0, v: 0, lineIndex: -1 };
     if (!fullPath || fullPath.length === 0) return defaultPoint;
-    const len = fullPath.length;
-    const idx = Math.max(0, Math.min(len - 1, Math.floor(state.progress * (len - 1))));
-    return fullPath[idx] || defaultPoint;
+    
+    const totalDistance = fullPath[fullPath.length - 1].distance;
+    const currentDist = totalDistance * state.progress;
+
+    for (let i = 0; i < fullPath.length - 1; i++) {
+      const p1 = fullPath[i];
+      const p2 = fullPath[i+1];
+      if (currentDist >= p1.distance && currentDist <= p2.distance) {
+        const segDist = p2.distance - p1.distance;
+        const alpha = segDist === 0 ? 0 : (currentDist - p1.distance) / segDist;
+        return {
+          x: p1.x + (p2.x - p1.x) * alpha,
+          y: p1.y + (p2.y - p1.y) * alpha,
+          u: p1.u + (p2.u - p1.u) * alpha,
+          v: p1.v + (p2.v - p1.v) * alpha,
+          lineIndex: p1.lineIndex
+        };
+      }
+    }
+    return fullPath[fullPath.length - 1];
   }, [fullPath, state.progress]);
+
+  // Animation Loop logic
+  useEffect(() => {
+    let lastTime = performance.now();
+    let frameId: number;
+
+    const animate = (time: number) => {
+      const delta = (time - lastTime) / 1000;
+      lastTime = time;
+
+      if (state.isPlaying && !state.isWireBroken) {
+        setState(prev => {
+          const mat = MATERIALS[prev.material];
+          const nextProgress = prev.progress + delta * prev.speed * mat.speedMult;
+          let currentTension = prev.speed * 40 * mat.riskMult;
+          
+          // Check for wire break conditions
+          if (fullPath.length > 2) {
+            const totalDistance = fullPath[fullPath.length - 1].distance;
+            const currentDist = totalDistance * nextProgress;
+            
+            // Find current segment in fullPath
+            for (let i = 0; i < fullPath.length - 1; i++) {
+              const p1 = fullPath[i];
+              const p2 = fullPath[i+1];
+              
+              if (currentDist >= p1.distance && currentDist <= p2.distance) {
+                // Check local geometry for tension
+                if (i > 0 && i < fullPath.length - 1) {
+                  const pPrev = fullPath[i-1];
+                  const pCurr = fullPath[i];
+                  const pNext = fullPath[i+1];
+
+                  const v1 = { x: pCurr.x - pPrev.x, y: pCurr.y - pPrev.y };
+                  const v2 = { x: pNext.x - pCurr.x, y: pNext.y - pCurr.y };
+
+                  const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y);
+                  const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y);
+
+                  if (mag1 > 0.1 && mag2 > 0.1) {
+                    const dot = (v1.x * v2.x + v1.y * v2.y) / (mag1 * mag2);
+                    const angle = Math.acos(Math.max(-1, Math.min(1, dot))) * (180 / Math.PI);
+                    currentTension += (angle / 90) * 40 * mat.riskMult;
+                    currentTension += (Math.abs(pCurr.u) + Math.abs(pCurr.v)) * 2 * mat.riskMult;
+
+                    const breakThreshold = 0.4 / mat.speedMult;
+                    if (angle > 45 && prev.speed > breakThreshold && Math.random() < (0.05 * mat.riskMult)) {
+                      return { 
+                        ...prev, 
+                        isPlaying: false, 
+                        isWireBroken: true, 
+                        tension: 100,
+                        breakReason: `Wire breakage at segment ${i}. Cause: Excessive tension on ${mat.name} at sharp corner (${angle.toFixed(1)}°).`
+                      };
+                    }
+                  }
+                }
+                break;
+              }
+            }
+          }
+
+          currentTension += (Math.random() - 0.5) * 5;
+          currentTension = Math.max(0, Math.min(100, currentTension));
+
+          if (nextProgress >= 1) {
+            return { ...prev, progress: 1, isPlaying: false, tension: 0 };
+          }
+          return { ...prev, progress: nextProgress, tension: currentTension };
+        });
+      } else if (!state.isPlaying) {
+        setState(prev => ({ ...prev, tension: 0 }));
+      }
+      frameId = requestAnimationFrame(animate);
+    };
+
+    frameId = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(frameId);
+  }, [state.isPlaying, state.speed, state.isWireBroken, fullPath]);
+
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-brand-bg select-none">
@@ -513,7 +563,7 @@ export const Simulator: React.FC = () => {
                   />
 
                 <Line 
-                  points={pathPoints.slice(0, Math.floor(pathPoints.length * state.progress) + 1)} 
+                  points={cutPoints} 
                   color={state.viewMode === '2D' ? '#ff9f0a' : '#f43f5e'} 
                   lineWidth={2} 
                 />
