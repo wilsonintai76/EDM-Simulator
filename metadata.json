@@ -1,0 +1,6 @@
+{
+  "name": "Wire EDM Simulator",
+  "description": "A standalone Wire Electrical Discharge Machining (EDM) simulator with G-code parsing, 3D visualization, and taper cut support for CNC teaching.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
